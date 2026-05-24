@@ -114,7 +114,7 @@ res = run_valuation_core(
     pe_low=stock_info['pe_low'], pe_high=stock_info['pe_high']
 )
 
-# ---- 步驟 4-5：UI 狀態燈號顯示與極端估值警示 ----
+# ---- 步驟 4-5：UI 狀態燈號顯示與極端估值警示 (加入非理性繁榮情緒溢價面板) ----
 if res:
     st.markdown("---")
     st.markdown("### 📈 Forward 12M 模型推算與滾動價值區間")
@@ -126,6 +126,50 @@ if res:
     pe_dynamic = round(market_price / res['eps_est'], 2) if res['eps_est'] != 0 else 0.0
     col_m4.metric("動態 Forward 12M PE", f"{pe_dynamic} 倍")
 
+    # 🌟 核心增強：計算與列出「非理性繁榮情緒溢價」風控指標
+    pe_high_base = float(stock_info['pe_high'])
+    irrational_pe_ceiling = round(pe_high_base * 1.25 * alpha_value, 2) # 歷史高標 x 1.25 x Re-rating
+    
+    # 計算目前市價高出「常態合理高標價值」的超額交易溢價比例
+    fair_high_price = res.get('fair_high_price', res['eps_est'] * pe_high_base * alpha_value) # 抓取合理區間頂部
+    overpriced_pct = int(round(((market_price - fair_high_price) / fair_high_price) * 100)) if fair_high_price > 0 else 0
+
+    # 建立一個專門的情緒溢價監控儀表板
+    st.markdown("#### 🧠 經理人風控監控：非理性繁榮情緒溢價指標")
+    v1, v2, v3 = st.columns(3)
+    with v1:
+        st.metric(
+            label="📊 歷史常態合理高標 PE", 
+            value=f"{pe_high_base} 倍",
+            help="過去 3 年大數據去雜訊後，法人認同的常態交易評價天花板。"
+        )
+    with v2:
+        st.metric(
+            label="🔥 非理性繁榮情緒溢價 PE 天花板", 
+            value=f"{irrational_pe_ceiling} 倍",
+            delta=f"+25% 情緒溢價",
+            delta_color="inverse", # 讓紅色代表本益比墊高的高風險
+            help="考慮到歷史最高評價再加價 25% 的極端追價情緒天花板（若開啟 Re-rating 則已包含 α 修正效應）。"
+        )
+    with v3:
+        if overpriced_pct > 0:
+            st.metric(
+                label="⚠️ 當前市價超額交易（溢價）", 
+                value=f"{overpriced_pct} %",
+                delta="超越歷史合理高標",
+                delta_color="inverse"
+            )
+        else:
+            st.metric(
+                label="🛡️ 當前市價安全邊際（折價）", 
+                value=f"{abs(overpriced_pct)} %",
+                delta="低於歷史合理高標",
+                delta_color="normal"
+            )
+
+    st.markdown(" ") # 留白保持 Scannable
+
+    # 原本的過熱/安全燈號警告
     if market_price > res['hot']:
         st.error(f"🔴 嚴重過熱：目前市價突破未來 12M 過熱防線 ({res['hot']}元)！當前動態本益比 {pe_dynamic} 倍，已超前交易過多未來預期。")
     elif market_price < res['cheap']:
