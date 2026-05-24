@@ -47,43 +47,40 @@ def fetch_stock_financials(ticker: str) -> dict:
         q_end_month = latest_fin_date.month 
         q_label = f"{latest_fin_date.year} Q{q_end_month // 3}"
 
-        # ---- 3. 跨年度月營收動態調配中心 ----
+# ---- 3. 跨年度月營收動態調配中心 (全域時間軸洗滌校正完全體) ----
         rev_start = f"{today.year - 2}-01-01"
         rev_df = api.taiwan_stock_month_revenue(stock_id=ticker, start_date=rev_start, end_date=today_str)
         if rev_df.empty:
             raise ValueError("無法取得月營收數據")
             
         rev_df['date'] = pd.to_datetime(rev_df['date'])
-        rev_df['year'] = rev_df['date'].dt.year
-        rev_df['month'] = rev_df['date'].dt.month
         
+        # 🌟 核心洗滌大手術：FinMind 的月份標籤集體超前一個月 (5月代表4月實績)，在此全域平移還原！
+        # 用原日期減去一個月，將標籤 2026-05-01 洗滌校正回真實的 2026-04-01
+        rev_df['correct_date'] = rev_df['date'] - pd.DateOffset(months=1)
+        rev_df['year'] = rev_df['correct_date'].dt.year
+        rev_df['month'] = rev_df['correct_date'].dt.month
+        
+        # 實時時間風控鎖：經過校正後，5/24 能拿到的真實營收最高就是 4 月 (today.month - 1)
         valid_max_month = today.month - 1 if today.year == latest_fin_date.year else 12
+        
         this_year_rev = rev_df[(rev_df['year'] == latest_fin_date.year) & (rev_df['month'] <= valid_max_month)].copy()
         this_year_rev = this_year_rev.sort_values('month')
         
-        # 🌟 核心硬核防禦：針對 7711 永擎在 FinMind 資料庫的特殊欄位錯位進行大清洗
-        if ticker == "7711":
-            # 永擎真實 4 月營收為 16.38 億 (由 1-4月累計 105.29億 減去 Q1 的 88.91億 完美還原)
-            gap_months_rev = 16.38
-            gap_months_list = [4]
-            max_reported_month = 4
-            latest_m_yoy = -44  # 真實 4 月 YoY 為 -44.22%
-            gap_label_str = "4月 (已啟動經理人基本面精確洗滌校正)"
+        # 找出經洗滌還原後，資料庫裡真正存在的「最新公告月份」
+        max_reported_month = this_year_rev['month'].max() if not this_year_rev.empty else q_end_month
+        
+        # 只有當經校正的最新月份大於季報截止月份時（如Q1截止3月，最新有4月），才代表有「新公告的過渡期月營收」
+        if max_reported_month > q_end_month:
+            gap_months_df = this_year_rev[(this_year_rev['month'] > q_end_month) & (this_year_rev['month'] <= max_reported_month)]
+            gap_months_rev = float(gap_months_df['revenue'].sum()) / 100000000.0
+            gap_months_list = list(gap_months_df['month'].values)
         else:
-            # 常態股的滾動計量邏輯
-            api_max_month = this_year_rev['month'].max() if not this_year_rev.empty else q_end_month
-            if api_max_month > q_end_month:
-                gap_months_df = this_year_rev[(this_year_rev['month'] > q_end_month) & (this_year_rev['month'] <= api_max_month)]
-                gap_months_rev = float(gap_months_df['revenue'].sum()) / 100000000.0
-                gap_months_list = list(gap_months_df['month'].values)
-                max_reported_month = api_max_month
-            else:
-                gap_months_rev = 0.0
-                gap_months_list = []
-                max_reported_month = q_end_month
-            gap_label_str = ", ".join([f"{m}月" for m in gap_months_list]) if gap_months_list else "無"
+            gap_months_rev = 0.0
+            gap_months_list = []
+            max_reported_month = q_end_month
 
-# 計算未來 12M 模型中，還剩下幾個月「未知」
+        # 計算未來 12M 模型中，還剩下幾個月「未知」需要用預估推算？
         remain_months_count = 12 - 3 - len(gap_months_list)
         start_m = max_reported_month + 1
         
@@ -99,22 +96,17 @@ def fetch_stock_financials(ticker: str) -> dict:
         last_y_remain_rev = 0.0
         remain_labels = []
         
-        # 🌟 法人級新股防禦：先算好當前單月平均營收，作為歷史缺漏時的「最嚴謹替代基期」
+        # 新股防護安全鎖：若遇到新股(如7711)去年同期無公開歷史數據，自動用今年Q1單月平均營收遞補
         q_avg_rev = latest_q_rev / 3.0 
         
         for y_target, m_target in remain_months_needed:
             y_base = y_target - 1 # 歷史對比基期為前一年
-            
-            # 前往營收資料庫撈取去年同期的數據
             match = rev_df[(rev_df['year'] == y_base) & (rev_df['month'] == m_target)]
             
             if not match.empty:
-                # 情況 A：去年同期有資料，正常加總
                 last_y_remain_rev += float(match['revenue'].iloc[0]) / 100000000.0
                 remain_labels.append(f"{m_target}月")
             else:
-                # 情況 B：新股在去年同期尚未掛牌、無資料（如永擎 5~9 月）
-                # 自動啟動安全替代鎖：拿當前最新一季的單月平均營收頂替，確保推算不失真！
                 last_y_remain_rev += q_avg_rev
                 remain_labels.append(f"{m_target}月(新股遞補)")
 
@@ -126,21 +118,24 @@ def fetch_stock_financials(ticker: str) -> dict:
             if past_q_rev > 0:
                 suggested_yoy = int(round(((latest_q_rev - past_q_rev) / past_q_rev) * 100))
 
-        # ---- 5. 最新單月營收 YoY 計算 (非 7711 股票才執行常態運算) ----
-        if ticker != "7711":
-            latest_m_yoy = 0
-            if gap_months_list:
-                target_month = gap_months_list[-1]
-                m_data = this_year_rev[this_year_rev['month'] == target_month]
-                if not m_data.empty:
-                    m_rev_2026 = float(m_data['revenue'].iloc[0])
-                    past_m_row = rev_df[(rev_df['year'] == (latest_fin_date.year - 1)) & (rev_df['month'] == target_month)]
-                    if not past_m_row.empty:
-                        m_rev_2025 = float(past_m_row['revenue'].iloc[0])
-                        if m_rev_2025 > 0:
-                            latest_m_yoy = int(round(((m_rev_2026 - m_rev_2025) / m_rev_2025) * 100))
-            else:
-                latest_m_yoy = suggested_yoy
+        # ---- 5. 最新單月營收 YoY 計算 (使用清洗校正後的真實單月營收對比) ----
+        latest_m_yoy = 0
+        latest_m_label = f"{max_reported_month}月"
+        
+        if max_reported_month > q_end_month:
+            m_data = this_year_rev[this_year_rev['month'] == max_reported_month]
+            if not m_data.empty:
+                m_rev_2026 = float(m_data['revenue'].iloc[0]) / 100000000.0
+                
+                # 撈取去年同期經洗滌後的真實單月營收
+                past_m_row = rev_df[(rev_df['year'] == (latest_fin_date.year - 1)) & (rev_df['month'] == max_reported_month)]
+                if not past_m_row.empty:
+                    m_rev_2025 = float(past_m_row['revenue'].iloc[0]) / 100000000.0
+                    if m_rev_2025 > 0:
+                        latest_m_yoy = int(round(((m_rev_2026 - m_rev_2025) / m_rev_2025) * 100))
+        else:
+            latest_m_yoy = suggested_yoy
+            latest_m_label = f"{q_label}季末"
 
         return {
             "current_price": current_price,
@@ -150,9 +145,9 @@ def fetch_stock_financials(ticker: str) -> dict:
             "last_y_remain_rev": round(last_y_remain_rev, 2),
             "suggested_yoy": max(-50, min(100, suggested_yoy)),
             "latest_m_yoy": latest_m_yoy,  
-            "latest_m_label": f"{max_reported_month}月", 
+            "latest_m_label": latest_m_label, 
             "q_label": q_label,
-            "gap_label": gap_label_str,
+            "gap_label": ", ".join([f"{m}月" for m in gap_months_list]) if gap_months_list else "無",
             "remain_label": ", ".join(remain_labels),
             "status": f"📊 滾動 12M 數據咬合成功 (基準季: {q_label})"
         }
