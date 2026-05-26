@@ -1,10 +1,11 @@
-# app.py
+# app.py (內建無縫調度 ＋ 雲端風控刷新完全體)
 import streamlit as st
 import pandas as pd
-import subprocess
 import os
 from model_engine import run_valuation_core
 from data_fetcher import fetch_stock_financials
+# 🌟 核心優化：直接引入重構後的內建歷史 PE 大數據計算核心
+from batch_update_pe import run_batch_update
 
 # 頁面初始化配置
 st.set_page_config(layout="wide", page_title="經理人價值管理系統", page_icon="📊")
@@ -181,7 +182,7 @@ if res:
 st.sidebar.markdown("---")
 st.sidebar.subheader("🗄️ 資料庫維護")
 
-with st.sidebar.expander("➕ 新增自選股票", expanded=False):
+with st.sidebar.expander("➕ 在外臨時新增股票", expanded=False):
     new_ticker = st.text_input("輸入股票代號 (如 2330)", key="new_ticker_input").strip()
     new_name = st.text_input("輸入股票名稱 (如 台積電)", key="new_name_input").strip()
     
@@ -192,11 +193,15 @@ with st.sidebar.expander("➕ 新增自選股票", expanded=False):
             else:
                 new_row = pd.DataFrame([{"ticker": int(new_ticker), "name": new_name, "pe_low": 0.0, "pe_high": 0.0}])
                 new_row.to_csv(csv_filename, mode='a', header=False, index=False, encoding="utf-8-sig")
-                st.success(f"✅ {new_ticker} {new_name} 已寫入資料庫！")
+                st.success(f"✅ {new_ticker} {new_name} 已臨時寫入雲端暫存！")
                 st.rerun()
 
+# 🌟 核心優化：徹底揮別 subprocess，改用原生內建函數執行大數據調度
 if st.sidebar.button("🔄 一鍵滾動更新歷史 PE 區間"):
     with st.sidebar.status("正在動態計算歷史 3 年大數據...", expanded=True) as status:
-        subprocess.run(["python", "batch_update_pe.py"])
-        status.update(label="💾 資料庫全數校正並寫入成功！", state="complete")
+        # 直接調用同一個 Python 沙盒環境下的核心邏輯，100% 免疫雲端作業系統環境衝突
+        ret_msg = run_batch_update()
+        status.update(label=ret_msg, state="complete")
+    
+    # 🌟 關鍵絕殺：強制網頁徹底重整，重新讀取 CSV，讓 0.0 的估值防線瞬間在畫面上被精確數字取代！
     st.rerun()
