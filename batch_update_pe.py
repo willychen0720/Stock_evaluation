@@ -1,4 +1,3 @@
-# batch_update_pe.py (輕量化精準打擊版)
 import pandas as pd
 import os
 import time
