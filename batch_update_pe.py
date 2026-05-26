@@ -1,4 +1,3 @@
-# batch_update_pe.py (內建函數無縫調度 ＋ 轉型亂碼修正完全體)
 import pandas as pd
 import os
 import time
