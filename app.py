@@ -5,7 +5,7 @@ import os
 from model_engine import run_valuation_core
 from data_fetcher import fetch_stock_financials
 # 🌟 核心優化：直接引入重構後的內建歷史 PE 大數據計算核心
-from batch_update_pe import run_batch_update
+from batch_update_pe import run_batch_update, run_targeted_update
 
 # 頁面初始化配置
 st.set_page_config(layout="wide", page_title="經理人價值管理系統", page_icon="📊")
@@ -195,6 +195,20 @@ with st.sidebar.expander("➕ 在外臨時新增股票", expanded=False):
                 new_row.to_csv(csv_filename, mode='a', header=False, index=False, encoding="utf-8-sig")
                 st.success(f"✅ {new_ticker} {new_name} 已臨時寫入雲端暫存！")
                 st.rerun()
+
+# 📱 按鈕 A：在外行動專用 ── 輕量化精準局部更新（省流量、速度極快）
+if st.sidebar.button("🎯 僅更新全新標的 PE (行動推薦)"):
+    with st.sidebar.status("正在精準定錨新股票大數據...", expanded=True) as status:
+        ret_msg = run_targeted_update()
+        status.update(label=ret_msg, state="complete")
+    st.rerun()
+
+# 💻 按鈕 B：全域大洗牌 ── 適合在家、在公司用固網維護
+if st.sidebar.button("🔄 一鍵滾動更新歷史 PE (全清單)"):
+    with st.sidebar.status("正在動態計算全資料庫 3 年大數據...", expanded=True) as status:
+        ret_msg = run_batch_update()
+        status.update(label=ret_msg, state="complete")
+    st.rerun()
 
 # 🌟 核心優化：徹底揮別 subprocess，改用原生內建函數執行大數據調度
 if st.sidebar.button("🔄 一鍵滾動更新歷史 PE 區間"):
