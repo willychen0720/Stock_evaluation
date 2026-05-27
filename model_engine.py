@@ -1,4 +1,3 @@
-# model_engine.py (毛利微調版：穩健 EPS 精確預測核心)
 import pandas as pd
 
 def run_valuation_core(latest_q_rev, latest_q_eps, latest_q_margin, gap_months_rev, remain_months_est_rev, pe_low, pe_high):
