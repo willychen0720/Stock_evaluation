@@ -1,182 +1,191 @@
-# data_fetcher.py (動態12M ＋ 永擎特定數據校正完全體)
+# data_fetcher.py (動態12M ＋ 數據請求減肥 ＋ 歷史 3 年 TTM 本益比統計引擎完全體)
 from FinMind.data import DataLoader
 import pandas as pd
 import numpy as np
 import datetime
 import streamlit as st
 
+# 🌟 綁定經理人的官方高頻放寬 Token
+MY_FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiV2lsbHljd3k3MjAiLCJlbWFpbCI6IndpbGx5ODc4Nzg3QGhvdG1haWwuY29tIiwidG9rZW5fdmVyc2lvbiI6MH0.j0VsZ1DNVFlvOXfFkpAGMDPEs_kLh1tezrNBv3FNfrU"
+
 @st.cache_data(ttl=3600)
 def fetch_stock_financials(ticker: str) -> dict:
-    """
-    【動態 12M 滾動模型優化版】
-    自動感應最新公告季報與月營收進度差，並針對新股(如7711永擎)進行底層欄位清洗與落後還原。
-    """
-    api = DataLoader()
+    api = DataLoader(token=MY_FINMIND_TOKEN)
     today = datetime.date.today()
     today_str = today.strftime('%Y-%m-%d')
     
     try:
-        # ---- 1. 抓取今日收盤價 ----
+        # --- [1] 原始股價抓取邏輯 ---
         start_price_date = (today - datetime.timedelta(days=7)).strftime('%Y-%m-%d')
         price_df = api.taiwan_stock_daily(stock_id=ticker, start_date=start_price_date, end_date=today_str)
-        if not price_df.empty:
-            current_price = float(price_df['close'].iloc[-1])
-        else:
-            raise ValueError("無法取得即時股價")
-
-        # ---- 2. 抓取綜合損益表 (自動感應最新單季) ----
-        fin_start = f"{today.year - 1}-01-01"
+        current_price = float(price_df['close'].iloc[-1]) if not price_df.empty else 100.0
+        
+        # --- [2] 原始財務數據抓取 ---
+        fin_start = f"{today.year - 2}-01-01" # 🌟 為了算季 YoY，這裡提早一年抓損益表
         financial_df = api.taiwan_stock_financial_statement(stock_id=ticker, start_date=fin_start, end_date=today_str)
-        if financial_df.empty:
-            raise ValueError("財報資料庫回傳空值")
+        
+        if financial_df.empty: raise ValueError("No Fin Data")
             
-        financial_df['date'] = pd.to_datetime(financial_df['date'])
+        eps_all = financial_df[financial_df['type'] == 'EPS'].sort_values('date')
+        if eps_all.empty: raise ValueError("No EPS Data")
+        latest_fin = eps_all.iloc[-1]
         
-        eps_all = financial_df[financial_df['type'] == 'EPS'].sort_values('date', ascending=False)
-        rev_all = financial_df[financial_df['type'] == 'Revenue'].sort_values('date', ascending=False)
+        latest_fin_date = pd.to_datetime(latest_fin['date'])
         
-        if eps_all.empty or rev_all.empty:
-            raise ValueError("損益表關鍵會計科目不完整")
-            
-        latest_fin_date = eps_all['date'].iloc[0]
-        latest_q_eps = float(eps_all['value'].iloc[0])
-        
-        target_rev_df = rev_all[rev_all['date'] == latest_fin_date]
-        latest_q_rev = float(target_rev_df['value'].iloc[0]) / 100000000.0 if not target_rev_df.empty else 50.0
-        
-        q_end_month = latest_fin_date.month 
-        q_label = f"{latest_fin_date.year} Q{q_end_month // 3}"
+        # 提取最新毛利率 (雙重防禦機制)
+        margin_all = financial_df[financial_df['type'] == 'GrossProfitMargin'].sort_values('date')
+        if not margin_all.empty:
+            latest_margin = float(margin_all.iloc[-1]['value'])
+        else:
+            gp_all = financial_df[financial_df['type'] == 'GrossProfit'].sort_values('date')
+            rev_fin_all_temp = financial_df[financial_df['type'] == 'Revenue'].sort_values('date')
+            if not gp_all.empty and not rev_fin_all_temp.empty:
+                latest_gp = float(gp_all.iloc[-1]['value'])
+                latest_rev_q = float(rev_fin_all_temp.iloc[-1]['value'])
+                latest_margin = (latest_gp / latest_rev_q) * 100 if latest_rev_q != 0 else 25.0
+            else:
+                latest_margin = 25.0
 
-# ---- 3. 跨年度月營收動態調配中心 (全域時間軸洗滌校正完全體) ----
+        # --- [3] 營業收入數據抓取與計算 ---
+        # 抓取季報的營收
+        rev_fin_all = financial_df[financial_df['type'] == 'Revenue'].sort_values('date')
+        latest_q_rev_calculated = float(rev_fin_all.iloc[-1]['value']) / 100000000.0 if not rev_fin_all.empty else 0.0
+
+        # 🌟 修復核心：計算真正的「季營收 YoY (suggested_yoy)」
+        suggested_yoy_calculated = 25 # 預設值
+        if not rev_fin_all.empty and len(rev_fin_all) >= 5:
+            # 找到去年同期的財報日期 (往前回推一年)
+            last_year_date = latest_fin_date - pd.DateOffset(years=1)
+            # 在資料庫中尋找是否有這天的紀錄
+            past_q_rev_df = rev_fin_all[pd.to_datetime(rev_fin_all['date']) == last_year_date]
+            if not past_q_rev_df.empty:
+                past_q_rev = float(past_q_rev_df.iloc[0]['value']) / 100000000.0
+                if past_q_rev > 0:
+                    suggested_yoy_calculated = int(round(((latest_q_rev_calculated - past_q_rev) / past_q_rev) * 100))
+
+        # 月營收抓取與跨年度對齊
         rev_start = f"{today.year - 2}-01-01"
         rev_df = api.taiwan_stock_month_revenue(stock_id=ticker, start_date=rev_start, end_date=today_str)
-        if rev_df.empty:
-            raise ValueError("無法取得月營收數據")
-            
-        rev_df['date'] = pd.to_datetime(rev_df['date'])
         
-        # 🌟 核心洗滌大手術：FinMind 的月份標籤集體超前一個月 (5月代表4月實績)，在此全域平移還原！
-        # 用原日期減去一個月，將標籤 2026-05-01 洗滌校正回真實的 2026-04-01
-        rev_df['correct_date'] = rev_df['date'] - pd.DateOffset(months=1)
-        rev_df['year'] = rev_df['correct_date'].dt.year
-        rev_df['month'] = rev_df['correct_date'].dt.month
-        
-        # 實時時間風控鎖：經過校正後，5/24 能拿到的真實營收最高就是 4 月 (today.month - 1)
-        valid_max_month = today.month - 1 if today.year == latest_fin_date.year else 12
-        
-        this_year_rev = rev_df[(rev_df['year'] == latest_fin_date.year) & (rev_df['month'] <= valid_max_month)].copy()
-        this_year_rev = this_year_rev.sort_values('month')
-        
-        # 找出經洗滌還原後，資料庫裡真正存在的「最新公告月份」
-        max_reported_month = this_year_rev['month'].max() if not this_year_rev.empty else q_end_month
-        
-        # 只有當經校正的最新月份大於季報截止月份時（如Q1截止3月，最新有4月），才代表有「新公告的過渡期月營收」
-        if max_reported_month > q_end_month:
-            gap_months_df = this_year_rev[(this_year_rev['month'] > q_end_month) & (this_year_rev['month'] <= max_reported_month)]
-            gap_months_rev = float(gap_months_df['revenue'].sum()) / 100000000.0
-            gap_months_list = list(gap_months_df['month'].values)
-        else:
-            gap_months_rev = 0.0
-            gap_months_list = []
-            max_reported_month = q_end_month
+        gap_months_rev_calculated = 0.0
+        last_y_remain_rev_calculated = 0.0
+        gap_label_str = "無"
+        remain_label_str = "未來月份"
+        latest_m_label_str = "最新月"
+        latest_m_yoy_calculated = 0
 
-        # 計算未來 12M 模型中，還剩下幾個月「未知」需要用預估推算？
-        remain_months_count = 12 - 3 - len(gap_months_list)
-        start_m = max_reported_month + 1
-        
-        remain_months_needed = []
-        for i in range(remain_months_count):
-            m = start_m + i
-            y = latest_fin_date.year
-            if m > 12:
-                m = m - 12
-                y = y + 1
-            remain_months_needed.append((y, m)) # 儲存目標推算的【今年/明年】月份
+        if not rev_df.empty:
+            rev_df['date'] = pd.to_datetime(rev_df['date'])
+            rev_df['correct_date'] = rev_df['date'] - pd.DateOffset(months=1)
+            rev_df['year'] = rev_df['correct_date'].dt.year
+            rev_df['month'] = rev_df['correct_date'].dt.month
             
-        last_y_remain_rev = 0.0
-        remain_labels = []
-        
-        # 新股防護安全鎖：若遇到新股(如7711)去年同期無公開歷史數據，自動用今年Q1單月平均營收遞補
-        q_avg_rev = latest_q_rev / 3.0 
-        
-        for y_target, m_target in remain_months_needed:
-            y_base = y_target - 1 # 歷史對比基期為前一年
-            match = rev_df[(rev_df['year'] == y_base) & (rev_df['month'] == m_target)]
+            q_end_month = latest_fin_date.month
+            valid_max_month = today.month - 1 if today.year == latest_fin_date.year else 12
             
-            if not match.empty:
-                last_y_remain_rev += float(match['revenue'].iloc[0]) / 100000000.0
-                remain_labels.append(f"{m_target}月")
+            this_year_rev = rev_df[(rev_df['year'] == latest_fin_date.year) & (rev_df['month'] <= valid_max_month)].sort_values('month')
+            max_reported_month = this_year_rev['month'].max() if not this_year_rev.empty else q_end_month
+            
+            if max_reported_month > q_end_month:
+                gap_months_df = this_year_rev[(this_year_rev['month'] > q_end_month) & (this_year_rev['month'] <= max_reported_month)]
+                gap_months_rev_calculated = float(gap_months_df['revenue'].sum()) / 100000000.0
+                gap_label_str = ", ".join([f"{m}月" for m in gap_months_df['month'].values])
             else:
-                last_y_remain_rev += q_avg_rev
-                remain_labels.append(f"{m_target}月(新股遞補)")
-
-        # ---- 4. 最新財報季度的真實營收 YoY ----
-        past_q_rev_df = rev_all[rev_all['date'] == (latest_fin_date - pd.DateOffset(years=1))]
-        suggested_yoy = 25
-        if not past_q_rev_df.empty:
-            past_q_rev = float(past_q_rev_df['value'].iloc[0]) / 100000000.0
-            if past_q_rev > 0:
-                suggested_yoy = int(round(((latest_q_rev - past_q_rev) / past_q_rev) * 100))
-
-        # ---- 5. 最新單月營收 YoY 計算 (使用清洗校正後的真實單月營收對比) ----
-        latest_m_yoy = 0
-        latest_m_label = f"{max_reported_month}月"
-        
-        if max_reported_month > q_end_month:
-            m_data = this_year_rev[this_year_rev['month'] == max_reported_month]
-            if not m_data.empty:
-                m_rev_2026 = float(m_data['revenue'].iloc[0]) / 100000000.0
+                max_reported_month = q_end_month
                 
-                # 撈取去年同期經洗滌後的真實單月營收
+            remain_months_count = 12 - 3 - (max_reported_month - q_end_month)
+            start_m = max_reported_month + 1
+            
+            remain_labels = []
+            for i in range(remain_months_count):
+                m_target = start_m + i
+                y_target = latest_fin_date.year
+                if m_target > 12:
+                    m_target -= 12
+                    y_target += 1
+                
+                y_base = y_target - 1
+                match = rev_df[(rev_df['year'] == y_base) & (rev_df['month'] == m_target)]
+                if not match.empty:
+                    last_y_remain_rev_calculated += float(match['revenue'].iloc[0]) / 100000000.0
+                    remain_labels.append(f"{m_target}月")
+            
+            remain_label_str = ", ".join(remain_labels) if remain_labels else "無"
+            
+            # 計算最新的單月 YoY
+            if max_reported_month > q_end_month:
+                m_data = this_year_rev[this_year_rev['month'] == max_reported_month]
                 past_m_row = rev_df[(rev_df['year'] == (latest_fin_date.year - 1)) & (rev_df['month'] == max_reported_month)]
-                if not past_m_row.empty:
+                if not m_data.empty and not past_m_row.empty:
+                    m_rev_2026 = float(m_data['revenue'].iloc[0]) / 100000000.0
                     m_rev_2025 = float(past_m_row['revenue'].iloc[0]) / 100000000.0
                     if m_rev_2025 > 0:
-                        latest_m_yoy = int(round(((m_rev_2026 - m_rev_2025) / m_rev_2025) * 100))
-        else:
-            latest_m_yoy = suggested_yoy
-            latest_m_label = f"{q_label}季末"
+                        latest_m_yoy_calculated = int(round(((m_rev_2026 - m_rev_2025) / m_rev_2025) * 100))
+            latest_m_label_str = f"{max_reported_month}月"
 
         return {
             "current_price": current_price,
-            "latest_q_rev": round(latest_q_rev, 2),
-            "latest_q_eps": round(latest_q_eps, 2),
-            "gap_months_rev": round(gap_months_rev, 2), 
-            "last_y_remain_rev": round(last_y_remain_rev, 2),
-            "suggested_yoy": max(-50, min(100, suggested_yoy)),
-            "latest_m_yoy": latest_m_yoy,  
-            "latest_m_label": latest_m_label, 
-            "q_label": q_label,
-            "gap_label": ", ".join([f"{m}月" for m in gap_months_list]) if gap_months_list else "無",
-            "remain_label": ", ".join(remain_labels),
-            "status": f"📊 滾動 12M 數據咬合成功 (基準季: {q_label})"
+            "latest_q_eps": float(latest_fin['value']),
+            "latest_q_margin": latest_margin,
+            "latest_q_rev": round(latest_q_rev_calculated, 2),
+            "gap_months_rev": round(gap_months_rev_calculated, 2),
+            "last_y_remain_rev": round(last_y_remain_rev_calculated, 2),
+            "suggested_yoy": max(-50, min(100, suggested_yoy_calculated)), # 🌟 季營收 YoY
+            "q_label": f"{latest_fin_date.year} Q{(latest_fin_date.month-1)//3 + 1}",
+            "gap_label": gap_label_str,
+            "remain_label": remain_label_str,
+            "latest_m_label": latest_m_label_str,
+            "latest_m_yoy": latest_m_yoy_calculated # 🌟 月營收 YoY (已拆分)
         }
-    
     except Exception as e:
-        info = {"current_price": 100.0, "latest_q_rev": 50.0, "latest_q_eps": 1.0, "gap_months_rev": 0.0, "last_y_remain_rev": 150.0, "suggested_yoy": 25, "latest_m_yoy": 0, "latest_m_label": "未知月", "q_label": "未知季", "gap_label": "無", "remain_label": "無"}
-        info["status"] = f"⚠️ 啟動防守預設值 (原因: {str(e)})"
-        return info
+        print(f"⚠️ fetch_stock_financials 內部報錯 ({ticker}): {e}")
+        return {"current_price": 100.0, "latest_q_eps": 1.0, "latest_q_margin": 25.0, "latest_q_rev": 50.0, "gap_months_rev": 0.0, "last_y_remain_rev": 150.0, "suggested_yoy": 25, "q_label": "讀取失敗", "gap_label": "無", "remain_label": "無", "latest_m_label": "未知月", "latest_m_yoy": 0}
 
 @st.cache_data(ttl=86400)
 def auto_compute_pe_intervals(ticker: str) -> tuple:
-    api = DataLoader()
+    api = DataLoader(token=MY_FINMIND_TOKEN)
     three_years_ago = (datetime.date.today() - datetime.timedelta(days=3*365)).strftime('%Y-%m-%d')
     today_str = datetime.date.today().strftime('%Y-%m-%d')
+    
     try:
         price_df = api.taiwan_stock_daily(stock_id=ticker, start_date=three_years_ago, end_date=today_str)
-        financial_df = api.taiwan_stock_financial_statement(stock_id=ticker, start_date=f"{datetime.date.today().year-2}-01-01", end_date=today_str)
+        financial_df = api.taiwan_stock_financial_statement(stock_id=ticker, start_date=f"{datetime.date.today().year-4}-01-01", end_date=today_str)
+        
         if price_df.empty or financial_df.empty: return 12.0, 18.0
+        
         eps_df = financial_df[financial_df['type'] == 'EPS'].copy()
         if eps_df.empty: return 12.0, 18.0
-        eps_df = eps_df.sort_values('date', ascending=False)
-        latest_4_quarters_eps = eps_df['value'].head(4).sum()
-        if latest_4_quarters_eps <= 0: return 8.0, 12.0
-        historical_pes = price_df['close'] / latest_4_quarters_eps
-        pe_mean = historical_pes.mean()
-        pe_std = historical_pes.std()
-        pe_low = max(8.0, pe_mean - (0.8 * pe_std))
-        pe_high = pe_mean + (0.8 * pe_std)
-        if pe_high > 50 and ticker != "4576": pe_high = 35.0
-        return round(pe_low, 1), round(pe_high, 1)
-    except Exception as e:
+        
+        eps_df['date'] = pd.to_datetime(eps_df['date'])
+        eps_df = eps_df.sort_values('date')
+        
+        eps_df['ttm_eps'] = eps_df['value'].rolling(window=4, min_periods=4).sum()
+        eps_df = eps_df.dropna(subset=['ttm_eps'])
+        
+        eps_df['date'] = pd.to_datetime(eps_df['date'])
+        eps_df = eps_df.sort_values('date')
+        
+        price_df['date'] = pd.to_datetime(price_df['date'])
+        price_df = price_df.sort_values('date')
+        
+        merged_df = pd.merge_asof(price_df, eps_df, on='date', direction='backward')
+        
+        merged_df['PE'] = merged_df['close'] / merged_df['ttm_eps']
+        
+        merged_df = merged_df[(merged_df['PE'] > 3) & (merged_df['PE'] < 60)].dropna()
+        
+        if merged_df.empty: return 12.0, 18.0
+        
+        pe_mean = merged_df['PE'].mean()
+        pe_std = merged_df['PE'].std()
+        
+        pe_low = round(max(5.0, pe_mean - 1.0 * pe_std), 1)
+        pe_high = round(min(50.0, pe_mean + 1.0 * pe_std), 1)
+        
+        if pe_low >= pe_high:
+            pe_low = round(max(5.0, pe_mean * 0.8), 1)
+            pe_high = round(min(50.0, pe_mean * 1.2), 1)
+            
+        return pe_low, pe_high
+    except:
         return 12.0, 18.0
