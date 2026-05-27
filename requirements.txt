@@ -6,3 +6,4 @@ tqdm
 anyio>=4.0.0
 uvicorn>=0.25.0
 FinMind
+beautifulsoup4
