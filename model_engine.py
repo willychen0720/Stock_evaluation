@@ -1,34 +1,40 @@
-# model_engine.py
+# model_engine.py (毛利微調版：穩健 EPS 精確預測核心)
 import pandas as pd
 
-def run_valuation_core(latest_q_rev, latest_q_eps, gap_months_rev, remain_months_est_rev, pe_low, pe_high):
+def run_valuation_core(latest_q_rev, latest_q_eps, latest_q_margin, gap_months_rev, remain_months_est_rev, pe_low, pe_high):
     """
-    底層精確計算公式：滾動 12 個月 (Forward 12M) 估值運算
+    底層精確計算公式：滾動 12 個月 (Forward 12M) 估值運算 (結合毛利率敏感度微調)
     """
-    if latest_q_rev == 0: return {}
+    if latest_q_rev == 0 or latest_q_margin == 0:
+        return {"eps_est": 0.0, "fair_range": "0 ~ 0", "cheap": 0.0, "hot": 0.0, "fair_high_price": 0.0}
     
-    # 1. 最新單季獲利效率 (每億元營收貢獻多少 EPS)
+    # 1. 基準淨利轉換效率 (每億元營收貢獻多少 EPS) - 這是最穩定的護城河
     e_base = latest_q_eps / latest_q_rev
     
-    # 2. 未來 12 個月預估總營收 = 最新單季實績 + 季報後已公告月營收 + 剩餘月份預估營收
+    # 2. 未來 12 個月預估總營收
     f12m_total_rev = latest_q_rev + gap_months_rev + remain_months_est_rev
     
-    # 3. 滾動 12 個月 Forward EPS 運算 (Re-rating 已直接反映在預估營收或外部係數中，此處回歸基本面交乘)
-    f12m_eps_est = f12m_total_rev * e_base
+    # 3. 未來 12 個月基準預估 EPS (在毛利率不變的前提下)
+    base_f12m_eps = f12m_total_rev * e_base
     
-    # 4. 根據全新預估 Forward EPS 計算價值區間
-    cheap_price = f12m_eps_est * pe_low
-    fair_low = f12m_eps_est * pe_low
-    fair_high = f12m_eps_est * pe_high
-    hot_price = f12m_eps_est * (pe_high * 1.25) # 過熱給予 25% 溢價
+    # (預留未來的微調空間)：
+    # 如果未來您在前端 app.py 加了「毛利率預估滑桿 (est_margin)」，
+    # 您可以在這裡加入： margin_adjustment_ratio = est_margin / latest_q_margin
+    # 然後： f12m_eps_est = base_f12m_eps * margin_adjustment_ratio
+    
+    # 目前先以穩健的基準值為主，徹底消滅 5000 多倍的暴衝
+    f12m_eps_est = base_f12m_eps
+    
+    # 4. 根據預估 Forward EPS 計算價值區間
+    cheap_price = round(f12m_eps_est * pe_low, 1)
+    fair_low = round(f12m_eps_est * pe_low, 1)
+    fair_high = round(f12m_eps_est * pe_high, 1)
+    hot_price = round(f12m_eps_est * pe_high * 1.25, 1)
     
     return {
-        "e_base": e_base,
-        "f12m_total_rev": f12m_total_rev,
-        "eps_est": f12m_eps_est,
+        "eps_est": round(f12m_eps_est, 2),
+        "fair_range": f"{fair_low} ~ {fair_high}",
         "cheap": cheap_price,
-        "fair_range": f"{round(fair_low, 1)} ~ {round(fair_high, 1)}",
-        "fair_low": fair_low,
-        "fair_high": fair_high,
-        "hot": hot_price
+        "hot": hot_price,
+        "fair_high_price": fair_high
     }
